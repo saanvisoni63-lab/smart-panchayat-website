@@ -35,7 +35,7 @@ function normalizeMongoUri(value) {
   return v;
 }
 
-const MONGODB_URI = normalizeMongoUri(process.env.MONGODB_URI) || 'mongodb://localhost:27017/smart-panchayat';
+const MONGODB_URI = normalizeMongoUri(process.env.MONGODB_URI) || 'mongodb+srv://shaanuu08_db_user:Saanvi123@cluster0.zy6q12e.mongodb.net/?appName=Cluster0';
 
 async function connectToMongoWithRetry() {
   const retryMs = Number(process.env.MONGO_RETRY_MS || 10_000);
@@ -65,15 +65,20 @@ app.use(express.json());
 app.use(express.static(__dirname));
 
 // ----- Email setup (Nodemailer) -----
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: Number(process.env.SMTP_PORT),
-  secure: false, // must be false for 587
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
+const SMTP_HOST = (process.env.SMTP_HOST || '').trim();
+const SMTP_PORT = Number(process.env.SMTP_PORT);
+const SMTP_USER = (process.env.SMTP_USER || '').trim();
+const SMTP_PASS = process.env.SMTP_PASS || '';
+
+const transporter =
+  SMTP_HOST && Number.isFinite(SMTP_PORT) && SMTP_PORT > 0 && SMTP_USER && SMTP_PASS
+    ? nodemailer.createTransport({
+        host: SMTP_HOST,
+        port: SMTP_PORT,
+        secure: false, // must be false for 587
+        auth: { user: SMTP_USER, pass: SMTP_PASS },
+      })
+    : null;
 
 // ----- SMS setup (Simple HTTP-based) -----
 // Supports multiple easy SMS providers or test mode
@@ -92,9 +97,10 @@ if (SMS_MODE === 'test') {
 
 // Utility: send email (non-fatal on error)
 async function sendLoginEmail({ to, username }) {
+  if (!transporter) return;
 
   const mailOptions = {
-    from: process.env.MAIL_FROM || process.env.SMTP_USER,
+    from: process.env.MAIL_FROM || SMTP_USER,
     to,
     subject: 'Login Alert - Smart Panchayat',
     text: `Dear ${username},\n\nYou have successfully logged in to Smart Panchayat.\n\nIf this was not you, please contact your administrator immediately.\n\nThank you,\nSmart Panchayat Team`
@@ -110,9 +116,10 @@ async function sendLoginEmail({ to, username }) {
 
 // Utility: send application registration email
 async function sendApplicationRegistrationEmail({ to, username, scheme, details }) {
+  if (!transporter) return;
   const detailsStr = Object.entries(details || {}).filter(([k]) => k !== 'user').map(([k, v]) => `- ${k}: ${v}`).join('\n');
   const mailOptions = {
-    from: process.env.MAIL_FROM || process.env.SMTP_USER,
+    from: process.env.MAIL_FROM || SMTP_USER,
     to,
     subject: `Application Submitted - ${scheme}`,
     text: `Dear ${username},\n\nYour application for '${scheme}' has been successfully submitted.\n\nHere are the details you provided:\n${detailsStr}\n\nYou can track the status in your dashboard.\n\nThank you,\nSmart Panchayat Team`
@@ -128,9 +135,10 @@ async function sendApplicationRegistrationEmail({ to, username, scheme, details 
 
 // Utility: send application status email
 async function sendApplicationStatusEmail({ to, username, scheme, status, adminRemark }) {
+  if (!transporter) return;
   let remarkText = adminRemark ? `\n\nAdmin Remark: ${adminRemark}` : '';
   const mailOptions = {
-    from: process.env.MAIL_FROM || process.env.SMTP_USER,
+    from: process.env.MAIL_FROM || SMTP_USER,
     to,
     subject: `Application Status Updated - ${scheme}`,
     text: `Dear ${username},\n\nThe status of your application for '${scheme}' has been updated to: ${status}.${remarkText}\n\nYou can view more details in your user dashboard.\n\nThank you,\nSmart Panchayat Team`
@@ -141,6 +149,25 @@ async function sendApplicationStatusEmail({ to, username, scheme, status, adminR
     console.log(`✅ Status email sent successfully to ${to}`);
   } catch (err) {
     console.error('Error sending status email:', err);
+  }
+}
+
+// Utility: send password reset email (used by forgot-password route)
+async function sendPasswordResetEmail({ to, username }) {
+  if (!transporter) return;
+
+  const mailOptions = {
+    from: process.env.MAIL_FROM || SMTP_USER,
+    to,
+    subject: 'Password Changed - Smart Panchayat',
+    text: `Dear ${username},\n\nYour password has been successfully reset as requested.\n\nThank you,\nSmart Panchayat Team`
+  };
+
+  try {
+    await transporter.sendMail(mailOptions);
+    console.log(`✅ Password reset email sent successfully to ${to}`);
+  } catch (err) {
+    console.error('Error sending password reset email:', err);
   }
 }
 
@@ -332,20 +359,10 @@ app.post('/api/forgot-password', async (req, res) => {
     user.password_hash = passwordHash;
     await user.save();
 
-    // Send confirmation email
-    const mailOptions = {
-      from: process.env.MAIL_FROM || process.env.SMTP_USER,
-      to: email,
-      subject: 'Password Changed - Smart Panchayat',
-      text: `Dear ${user.username},\n\nYour password has been successfully reset as requested.\n\nThank you,\nSmart Panchayat Team`
-    };
-
-    try {
-      await transporter.sendMail(mailOptions);
-      console.log(`✅ Password reset email sent successfully to ${email}`);
-    } catch (err) {
-      console.error('Error sending password reset email:', err);
-    }
+    // Send confirmation email asynchronously (non-fatal)
+    sendPasswordResetEmail({ to: email, username: user.username }).catch((err) => {
+      console.error('Password reset email error:', err?.message || err);
+    });
 
     return res.json({ success: true, message: 'Password has been reset successfully. Please login with your new password.' });
   } catch (err) {
@@ -800,7 +817,7 @@ app.get('/api/admin/complaints', async (req, res) => {
 // Update complaint status (admin only)
 app.post('/api/admin/complaints/:id/status', async (req, res) => {
   try {
-    const { id } = params = req.params;
+    const { id } = req.params;
     const { status, adminResponse } = req.body || {};
 
     if (!status || !['Open', 'In Progress', 'Resolved'].includes(status)) {
